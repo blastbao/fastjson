@@ -60,18 +60,23 @@ func (c *cache) reset() {
 	c.vs = c.vs[:0]
 }
 
+// 从缓存中获取一个可用的 Value 对象
 func (c *cache) getValue() *Value {
+	// 切片未满，通过调整切片长度来"激活"一个预分配的元素；这里没有分配新内存，只是扩展切片的可见部分。
 	if cap(c.vs) > len(c.vs) {
 		c.vs = c.vs[:len(c.vs)+1]
 	} else {
+		// 切片已满，用 append 添加一个新的 Value{} ；Go 会自动处理底层数组的扩容。
 		c.vs = append(c.vs, Value{})
 	}
 	// Do not reset the value, since the caller must properly init it.
+	// 返回切片中最后一个元素的地址，这个元素要么是新激活的预分配元素，要么是新追加的元素。
 	return &c.vs[len(c.vs)-1]
 }
 
+// 跳过字符串的前导空白字符
 func skipWS(s string) string {
-	if len(s) == 0 || s[0] > 0x20 {
+	if len(s) == 0 || s[0] > 0x20 { // ASCII 码大于 0x20(32) 的字符都是非空白字符，小于等于 32 的字符可能是空白字符或其他控制字符
 		// Fast path.
 		return s
 	}
@@ -79,9 +84,11 @@ func skipWS(s string) string {
 }
 
 func skipWSSlow(s string) string {
+	// 检查第一个字符是否是四种空白字符之一
 	if len(s) == 0 || s[0] != 0x20 && s[0] != 0x0A && s[0] != 0x09 && s[0] != 0x0D {
 		return s
 	}
+	// 循环跳过前导空白字符
 	for i := 1; i < len(s); i++ {
 		if s[i] != 0x20 && s[i] != 0x0A && s[i] != 0x09 && s[i] != 0x0D {
 			return s[i:]
@@ -102,11 +109,21 @@ func parseValue(s string, c *cache, depth int) (*Value, string, error) {
 	if len(s) == 0 {
 		return nil, s, fmt.Errorf("cannot parse empty string")
 	}
+
+	// 深度控制，防止栈溢出
 	depth++
 	if depth > MaxDepth {
 		return nil, s, fmt.Errorf("too big depth for the nested JSON; it exceeds %d", MaxDepth)
 	}
 
+	// 根据 s[0] 的首字符，判断当前值的类型：
+	//	'{' → 调 parseObject
+	//	'[' → 调 parseArray
+	//	'"' → 调 parseRawString
+	//	't' → 必须是 true
+	//	'f' → 必须是 false
+	//	'n' → 必须是 null 或 nan
+	//	其他 → 当作 number 调 parseRawNumber
 	if s[0] == '{' {
 		v, tail, err := parseObject(s[1:], c, depth)
 		if err != nil {
@@ -211,42 +228,57 @@ func parseArray(s string, c *cache, depth int) (*Value, string, error) {
 }
 
 func parseObject(s string, c *cache, depth int) (*Value, string, error) {
+	// 跳过前导空白
 	s = skipWS(s)
-	if len(s) == 0 {
+	if len(s) == 0 { // 缺少闭合 } 字符。
 		return nil, s, fmt.Errorf("missing '}'")
 	}
 
+	// 检查是否是空对象
 	if s[0] == '}' {
-		v := c.getValue()
-		v.t = TypeObject
-		v.o.reset()
-		return v, s[1:], nil
+		v := c.getValue()    // 从缓存中获取一个空 Value
+		v.t = TypeObject     // 设置数据类型
+		v.o.reset()          // 清空对象的键值对
+		return v, s[1:], nil // 返回空对象，推进 s 来跳过 } 。
 	}
 
+	// 获取一个空对象
 	o := c.getValue()
 	o.t = TypeObject
 	o.o.reset()
+
+	// 循环解析键值对，直到遇到结束的 } 。
 	for {
 		var err error
+		///// 在 Object 的内部键值对切片中分配一个新的槽位，返回指向该槽位的指针
 		kv := o.o.getKV()
 
-		// Parse key.
+		///// 解析 key
+
+		// 跳过前导空白
 		s = skipWS(s)
+		// 键必须是以双引号 " 开头的字符串
 		if len(s) == 0 || s[0] != '"' {
 			return nil, s, fmt.Errorf(`cannot find opening '"" for object key`)
 		}
+		// 跳过开头的 " ，解析出 key 并保存到 kv.k
 		kv.k, s, err = parseRawKey(s[1:])
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot parse object key: %s", err)
 		}
+		// 检查 : 分隔符
 		s = skipWS(s)
 		if len(s) == 0 || s[0] != ':' {
 			return nil, s, fmt.Errorf("missing ':' after object key")
 		}
+		// 跳过 : 分隔符
 		s = s[1:]
 
-		// Parse value
+		///// 解析 value
+
+		// 跳过前导空白
 		s = skipWS(s)
+		// 解析出 value 并保存到 kv.v
 		kv.v, s, err = parseValue(s, c, depth)
 		if err != nil {
 			return nil, s, fmt.Errorf("cannot parse object value: %s", err)
@@ -255,18 +287,25 @@ func parseObject(s string, c *cache, depth int) (*Value, string, error) {
 		if len(s) == 0 {
 			return nil, s, fmt.Errorf("unexpected end of object")
 		}
+		// 遇到 , 意味着还有更多键值对，跳过逗号继续循环
 		if s[0] == ',' {
 			s = s[1:]
 			continue
 		}
+		// 遇到 } 意味着对象结束，跳过右花括号，返回解析结果
 		if s[0] == '}' {
 			return o, s[1:], nil
 		}
+
+		// 其它字符，报错
 		return nil, s, fmt.Errorf("missing ',' after object value")
 	}
 }
 
 func escapeString(dst []byte, s string) []byte {
+
+	// 快速路径：
+	//	当 s 不包含任何需要转义的特殊字符时，直接在 s 前后添加双引号后返回。
 	if !hasSpecialChars(s) {
 		// Fast path - nothing to escape.
 		dst = append(dst, '"')
@@ -276,13 +315,29 @@ func escapeString(dst []byte, s string) []byte {
 	}
 
 	// Slow path.
+	// 当 s 包含需要转义的特殊字符时，使用 Go 标准库的 strconv.AppendQuote 函数来转义。
 	return strconv.AppendQuote(dst, s)
 }
 
+// hasSpecialChars 判断字符串 s 中是否包含需要转义的特殊字符
+//
+// 需转义的字符类型：
+//
+//	∙ 双引号 (")：必须转义为 \" ，因为双引号用于标记字符串的边界。
+//	∙ 反斜杠 (\)：必须转义为 \\ ，因为反斜杠本身是转义字符。
+//	∙ 控制字符（ASCII < 0x20）：包括：
+//		∙ \b (退格，0x08)
+//		∙ \f (换页，0x0C)
+//		∙ \n (换行，0x0A)
+//		∙ \r (回车，0x0D)
+//		∙ \t (制表符，0x09)
+//		∙ 其他控制字符会转义为 \u00XX 形式
 func hasSpecialChars(s string) bool {
+	// 检查双引号和反斜杠
 	if strings.IndexByte(s, '"') >= 0 || strings.IndexByte(s, '\\') >= 0 {
 		return true
 	}
+	// 检查控制字符（ASCII < 0x20）
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x20 {
 			return true
@@ -292,50 +347,62 @@ func hasSpecialChars(s string) bool {
 }
 
 func unescapeStringBestEffort(s string) string {
+	// 当字符串中不包含反斜杠 \ 时，直接返回原字符串，无需任何处理。
 	n := strings.IndexByte(s, '\\')
 	if n < 0 {
-		// Fast path - nothing to unescape.
-		return s
+		return s // Fast path - nothing to unescape.
 	}
-
 	// Slow path - unescape string.
-	b := s2b(s) // It is safe to do, since s points to a byte slice in Parser.b.
-	b = b[:n]
-	s = s[n+1:]
+
+	// 当 s 中包含反斜杠时，进入详细的转义处理逻辑。
+	b := s2b(s) // 直接把 string 转为 []byte ，这种转换是安全的，因为 s 指向 Parser.b 中的字节切片
+	b = b[:n]   // 保留反斜杠前的部分，视作已解码内容
+	s = s[n+1:] // 跳过反斜杠
+
 	for len(s) > 0 {
-		ch := s[0]
-		s = s[1:]
+		ch := s[0] // 取出反斜杠后的第一个字符
+		s = s[1:]  // 把这个字符从剩余内容中去掉
 		switch ch {
 		case '"':
-			b = append(b, '"')
+			b = append(b, '"') // 将 \" 转换为 "
 		case '\\':
-			b = append(b, '\\')
+			b = append(b, '\\') // 将 \\ 转换为 \
 		case '/':
-			b = append(b, '/')
+			b = append(b, '/') // 将 \/ 转换为 /
 		case 'b':
-			b = append(b, '\b')
+			b = append(b, '\b') // 将 \b 转换为退格符
 		case 'f':
-			b = append(b, '\f')
+			b = append(b, '\f') // 将 \f 转换为换页符
 		case 'n':
-			b = append(b, '\n')
+			b = append(b, '\n') // 将 \n 转换为换行符
 		case 'r':
-			b = append(b, '\r')
+			b = append(b, '\r') // 将 \r 转换为回车符
 		case 't':
-			b = append(b, '\t')
+			b = append(b, '\t') // 将 \t 转换为制表符，这里追加的 '\t' 看着和原始字符串一样，但实际含义不同
 		case 'u':
+			// \u 需要解析 4 或 8 个 hex 字符
+
+			// 序列太短，保持原样
 			if len(s) < 4 {
 				// Too short escape sequence. Just store it unchanged.
 				b = append(b, "\\u"...)
 				break
 			}
+
+			// 提取 4 个十六进制字符，转换为 uint64
 			xs := s[:4]
 			x, err := strconv.ParseUint(xs, 16, 16)
 			if err != nil {
 				// Invalid escape sequence. Just store it unchanged.
+				// 无效的十六进制，保持原样
 				b = append(b, "\\u"...)
 				break
 			}
+
+			// 消耗掉这4个字符
 			s = s[4:]
+
+			// 非代理对，直接转换
 			if !utf16.IsSurrogate(rune(x)) {
 				b = append(b, string(rune(x))...)
 				break
@@ -343,7 +410,10 @@ func unescapeStringBestEffort(s string) string {
 
 			// Surrogate.
 			// See https://en.wikipedia.org/wiki/Universal_Character_Set_characters#Surrogates
+			//
+			// 处理代理对
 			if len(s) < 6 || s[0] != '\\' || s[1] != 'u' {
+				// 没有配对的代理项，保持原样
 				b = append(b, "\\u"...)
 				b = append(b, xs...)
 				break
@@ -354,13 +424,18 @@ func unescapeStringBestEffort(s string) string {
 				b = append(b, xs...)
 				break
 			}
+
+			// 解码 UTF-16 代理对为完整的 Unicode 字符
 			r := utf16.DecodeRune(rune(x), rune(x1))
 			b = append(b, string(r)...)
 			s = s[6:]
 		default:
 			// Unknown escape sequence. Just store it unchanged.
+			// 未知转义序列，保持原样
 			b = append(b, '\\', ch)
 		}
+
+		// 继续查找下一个反斜杠 \ 的位置，如果没有找到，直接追加剩余字符串并结束循环，否则继续处理下一个反斜杠。
 		n = strings.IndexByte(s, '\\')
 		if n < 0 {
 			b = append(b, s...)
@@ -369,12 +444,16 @@ func unescapeStringBestEffort(s string) string {
 		b = append(b, s[:n]...)
 		s = s[n+1:]
 	}
+
+	// 将处理后的字节切片转换回字符串返回
 	return b2s(b)
 }
 
 // parseRawKey is similar to parseRawString, but is optimized
 // for small-sized keys without escape sequences.
 func parseRawKey(s string) (string, string, error) {
+	// 扫描字符串，如果遇到一个 " 且其之前没有 \ ，说明这是 key 的结束引号。
+	// 如果在扫描过程中先遇到了 \ 那么直接走 slow path 。
 	for i := 0; i < len(s); i++ {
 		if s[i] == '"' {
 			// Fast path.
@@ -389,31 +468,43 @@ func parseRawKey(s string) (string, string, error) {
 }
 
 func parseRawString(s string) (string, string, error) {
+	// 找到第一个双引号的位置，这个引号是标识字符串结束的双引号
 	n := strings.IndexByte(s, '"')
+	// 没找到，报错
 	if n < 0 {
 		return s, "", fmt.Errorf(`missing closing '"'`)
 	}
+	// 如果双引号在开头 (n == 0)，或者双引号前不是反斜杠，说明这个双引号没有被转义，是真正的结束引号
 	if n == 0 || s[n-1] != '\\' {
 		// Fast path. No escaped ".
+		// 返回第一个双引号前的内容和剩余字符串
 		return s[:n], s[n+1:], nil
 	}
 
 	// Slow path - possible escaped " found.
+	// 如果首个双引号被转义了，那么需要继续往后找，直到找到首个未转义的双引号，其标识着字符串结束。
+
+	// 保存原始字符串的引用
 	ss := s
 	for {
+		// 从 n-1（即首个 " 的前一个位置）往前数，统计连续的 \ 。
 		i := n - 1
 		for i > 0 && s[i-1] == '\\' {
 			i--
 		}
+
+		// (n-i) = 连续 \ 的个数，如果是偶数，说明 " 没有被转义，此时 " 是合法的结束引号，如果是奇数，说明这个 " 是被转义的，继续查找。
 		if uint(n-i)%2 == 0 {
 			return ss[:len(ss)-len(s)+n], s[n+1:], nil
 		}
-		s = s[n+1:]
 
+		// 跳过这个被转义的 " ，继续查找下一个双引号。
+		s = s[n+1:]
 		n = strings.IndexByte(s, '"')
 		if n < 0 {
 			return ss, "", fmt.Errorf(`missing closing '"'`)
 		}
+		// 如果找到的 " 不是被转义的，直接返回，否则 continue
 		if n == 0 || s[n-1] != '\\' {
 			return ss[:len(ss)-len(s)+n], s[n+1:], nil
 		}
@@ -450,8 +541,8 @@ func parseRawNumber(s string) (string, string, error) {
 // Object cannot be used from concurrent goroutines.
 // Use per-goroutine parsers or ParserPool instead.
 type Object struct {
-	kvs           []kv
-	keysUnescaped bool
+	kvs           []kv // 对象的键值对列表
+	keysUnescaped bool // 优化标志，表示键是否是未转义的纯字符串
 }
 
 func (o *Object) reset() {
@@ -566,23 +657,33 @@ func (o *Object) Visit(f func(key []byte, v *Value)) {
 // Value cannot be used from concurrent goroutines.
 // Use per-goroutine parsers or ParserPool instead.
 type Value struct {
-	o Object
-	a []*Value
-	s string
-	t Type
+	o Object   // 对象类型
+	a []*Value // 数组类型
+	s string   // 字符串/数字类型
+	t Type     // 类型标记
 }
 
 // MarshalTo appends marshaled v to dst and returns the result.
 func (v *Value) MarshalTo(dst []byte) []byte {
 	switch v.t {
 	case typeRawString:
+		// 原始字符串类型：
+		//	∙ 在字符串前后添加双引号
+		//	∙ 直接将字符串内容 v.s 追加到结果中，不做转义处理
 		dst = append(dst, '"')
 		dst = append(dst, v.s...)
 		dst = append(dst, '"')
 		return dst
 	case TypeObject:
+		// 对象类型：
+		//	∙ 委托给 Object的 MarshalTo方法处理
 		return v.o.MarshalTo(dst)
 	case TypeArray:
+		// 数组类型：
+		//	∙ 添加左方括号 [
+		//	∙ 遍历数组元素，递归调用每个元素的 MarshalTo
+		//	∙ 在元素间添加逗号分隔符
+		//	∙ 最后添加右方括号 ]
 		dst = append(dst, '[')
 		for i, vv := range v.a {
 			dst = vv.MarshalTo(dst)
@@ -593,8 +694,12 @@ func (v *Value) MarshalTo(dst []byte) []byte {
 		dst = append(dst, ']')
 		return dst
 	case TypeString:
+		// 字符串类型：
+		//  ∙ 调用 escapeString 对字符串进行转义处理
 		return escapeString(dst, v.s)
 	case TypeNumber:
+		// 数字类型：
+		//	∙ 直接将数字字符串表示追加到结果中
 		return append(dst, v.s...)
 	case TypeTrue:
 		return append(dst, "true"...)
@@ -702,22 +807,27 @@ func (v *Value) Get(keys ...string) *Value {
 	if v == nil {
 		return nil
 	}
+	// 按路径查询，逐层深入访问
 	for _, key := range keys {
 		if v.t == TypeObject {
+			// 如果是对象，调用对象自己的 Get 方法查找键对应的值，找不到返回 nil
 			v = v.o.Get(key)
 			if v == nil {
 				return nil
 			}
 		} else if v.t == TypeArray {
+			// 如果是数组，将键转换为数组索引，返回对应元素
 			n, err := strconv.Atoi(key)
 			if err != nil || n < 0 || n >= len(v.a) {
 				return nil
 			}
 			v = v.a[n]
 		} else {
+			// 其它类型，返回 nil
 			return nil
 		}
 	}
+	// 返回最终找到的 Value
 	return v
 }
 

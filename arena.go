@@ -8,16 +8,16 @@ import (
 //
 // Typical Arena lifecycle:
 //
-//     1) Construct Values via the Arena and Value.Set* calls.
-//     2) Marshal the constructed Values with Value.MarshalTo call.
-//     3) Reset all the constructed Values at once by Arena.Reset call.
-//     4) Go to 1 and re-use the Arena.
+//  1. Construct Values via the Arena and Value.Set* calls.
+//  2. Marshal the constructed Values with Value.MarshalTo call.
+//  3. Reset all the constructed Values at once by Arena.Reset call.
+//  4. Go to 1 and re-use the Arena.
 //
 // It is unsafe calling Arena methods from concurrent goroutines.
 // Use per-goroutine Arenas or ArenaPool instead.
 type Arena struct {
-	b []byte
-	c cache
+	b []byte // 存放字符串或数字的序列化结果
+	c cache  // Value 对象池，避免每次创建 Value 都 new 一个新的。
 }
 
 // Reset resets all the Values allocated by a.
