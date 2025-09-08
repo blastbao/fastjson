@@ -185,11 +185,13 @@ func parseValue(s string, c *cache, depth int) (*Value, string, error) {
 }
 
 func parseArray(s string, c *cache, depth int) (*Value, string, error) {
+	// 先跳过前导空白
 	s = skipWS(s)
+	// 如果 s 为空，说明缺少 ]，直接报错
 	if len(s) == 0 {
 		return nil, s, fmt.Errorf("missing ']'")
 	}
-
+	// 如果遇到 ] ，说明是一个 空数组，直接返回一个 TypeArray 类型的 Value，其中 a 被清空（v.a[:0]），然后跳过 ] 。
 	if s[0] == ']' {
 		v := c.getValue()
 		v.t = TypeArray
@@ -197,13 +199,17 @@ func parseArray(s string, c *cache, depth int) (*Value, string, error) {
 		return v, s[1:], nil
 	}
 
+	// 创建数组节点
 	a := c.getValue()
 	a.t = TypeArray
 	a.a = a.a[:0]
+
+	// 循环解析数组元素
 	for {
 		var v *Value
 		var err error
 
+		/// 调用 parseValue 解析下一个值，将解析出的值追加到数组中。
 		s = skipWS(s)
 		v, s, err = parseValue(s, c, depth)
 		if err != nil {
@@ -211,18 +217,21 @@ func parseArray(s string, c *cache, depth int) (*Value, string, error) {
 		}
 		a.a = append(a.a, v)
 
+		/// 处理分隔符 , 或结束符 ]
 		s = skipWS(s)
-		if len(s) == 0 {
+		if len(s) == 0 { // 如果输入用完了，还没遇到 ]，报错。
 			return nil, s, fmt.Errorf("unexpected end of array")
 		}
-		if s[0] == ',' {
+		if s[0] == ',' { // 如果遇到 ,，说明后面还有元素，跳过 , 进入下一轮循环。
 			s = s[1:]
 			continue
 		}
-		if s[0] == ']' {
+		if s[0] == ']' { // 如果遇到 ]，说明数组结束，返回结果。
 			s = s[1:]
 			return a, s, nil
 		}
+
+		/// 其他情况，说明格式不对，比如 [1 2] 少了逗号，报错。
 		return nil, s, fmt.Errorf("missing ',' after array value")
 	}
 }
@@ -303,7 +312,6 @@ func parseObject(s string, c *cache, depth int) (*Value, string, error) {
 }
 
 func escapeString(dst []byte, s string) []byte {
-
 	// 快速路径：
 	//	当 s 不包含任何需要转义的特殊字符时，直接在 s 前后添加双引号后返回。
 	if !hasSpecialChars(s) {
@@ -511,15 +519,24 @@ func parseRawString(s string) (string, string, error) {
 	}
 }
 
+// 从字符串 s 的开头提取出一个数字字面量，并返回剩余字符串。
 func parseRawNumber(s string) (string, string, error) {
 	// The caller must ensure len(s) > 0
 
 	// Find the end of the number.
 	for i := 0; i < len(s); i++ {
+
+		// 遍历字符串 s 的每个字符，如果是数、.、-/+、e/E，继续扫描，直到遇到非数字字符。
 		ch := s[i]
 		if (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == 'e' || ch == 'E' || ch == '+' {
 			continue
 		}
+
+		// 两种情况：
+		//	1）第一个字符就不是数字字符（比如 a, [, { 等），如 abc123
+		//	2）第二个字符不是数字字符，但第一个字符是 - 或 + ，如 -a123
+		// 此时，需要进一步检查是否是 Nan/+NaN/-NaN 或者是 Inf/+Inf/-Inf（大小写不敏感），
+		// 如果不是 inf / nan ，则无法识别，直接报错，否则返回该原始字符串。
 		if i == 0 || i == 1 && (s[0] == '-' || s[0] == '+') {
 			if len(s[i:]) >= 3 {
 				xs := s[i : i+3]
@@ -529,6 +546,8 @@ func parseRawNumber(s string) (string, string, error) {
 			}
 			return "", s, fmt.Errorf("unexpected char: %q", s[:1])
 		}
+
+		// 遇到第一个非数字字符，直接结束并返回
 		ns := s[:i]
 		s = s[i:]
 		return ns, s, nil
